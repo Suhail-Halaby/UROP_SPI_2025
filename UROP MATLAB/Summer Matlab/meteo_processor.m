@@ -1,0 +1,81 @@
+clear
+clc
+
+
+%% Structure:
+lat_range = 51.9:0.02:52.1;
+long_range = -0.12:0.01:0.12; 
+
+disp("Number of Requests:")
+
+disp(24*length(lat_range)*length(long_range))
+
+
+refpoints = zeros(length(long_range)*length(lat_range),2);
+k = 1;
+for i = 1:length(lat_range)
+    for j = 1:length(long_range)
+        refpoints(k,1) = lat_range(i);
+        refpoints(k,2) = long_range(j);
+        k = k+1;
+    end
+end
+
+
+%lat %long %time %data1 %data2 
+
+
+% refpoints = [51.5074 -0.1278; 48.8566 2.3522];  % London & Paris
+% vars = "temperature_2m";
+% weatherTable = getWeatherMultiple(refpoints, vars, 'Europe/London');
+% disp(weatherTable)
+
+
+
+vars = "temperature_2m,precipitation,wind_speed_10m,wind_speed_80m,wind_speed_120m,wind_speed_180m,wind_direction_10m,wind_direction_80m,wind_direction_120m,wind_direction_180m";
+
+
+%% API PULL
+
+baseUrl = 'https://api.open-meteo.com/v1/forecast';
+timezone = 'Europe/London'; % let Open-Meteo guess
+
+grand_matrix = [];
+
+dayStr = datestr(datetime("yesterday"), 'yyyy-mm-dd');
+
+
+for k = 1:size(refpoints,1)
+    lat = refpoints(k,1);
+    lon = refpoints(k,2);
+
+    params = [
+        "latitude=" + num2str(lat), ...
+        "longitude=" + num2str(lon), ...
+        "current_weather=false", ...
+        "hourly=" + vars, ...
+        "timezone=" + timezone, ...
+        "start_date=" + dayStr, ...
+        "end_date="   + dayStr, ...
+        "windspeed_unit=ms"
+    ];
+    fullUrl = baseUrl + "?" + strjoin(params, "&");
+
+    options = weboptions('ContentType','json');
+    data = webread(fullUrl, options);
+    
+    
+    time = datetime(data.hourly.time, 'InputFormat','yyyy-MM-dd''T''HH:mm');
+
+    % hours since first timestamp:
+    hours_since_first_midnight = hours(time - time(1));
+
+
+    n_entries = size(data.hourly.time,1);
+
+    data_matrix = [ones(n_entries,2).*refpoints(k,:),hours_since_first_midnight,data.hourly.wind_speed_10m, data.hourly.wind_direction_10m,data.hourly.wind_speed_80m, data.hourly.wind_direction_80m,data.hourly.wind_speed_120m, data.hourly.wind_direction_120m];
+    grand_matrix = [grand_matrix;data_matrix];
+    
+end
+
+writematrix(grand_matrix,'METEO_data.csv');

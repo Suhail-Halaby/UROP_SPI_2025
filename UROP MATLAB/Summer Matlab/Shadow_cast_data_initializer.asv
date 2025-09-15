@@ -1,0 +1,163 @@
+%% SHADOW CASTER
+clear 
+clc
+%% Main Wing
+n_elem = 3; 
+
+chord_dist = [0.25, 0.25, 0.20,0.10];
+span = [1.9,0.1,0.1];
+dihedral   = [6,8,12];
+twist      = [3,3,3,3];
+sweep      = [0,0,0.05,0.1];
+
+x_root = 0.75;
+z_root = 0;
+
+symmetric = true;
+
+plane.wing = initialize_panel(n_elem,chord_dist,span,dihedral,twist,sweep,x_root,z_root,symmetric);
+clear n_elem chord_dist span dihedral twist sweep x_root z_root symmetric
+%% H-stab
+n_elem = 1; 
+
+chord_dist = [0.25, 0.25];
+span = 0.5;
+dihedral   = [0,0];
+twist      = [0,0];
+sweep      = [0,0];
+
+x_root = 1.90;
+z_root = 0.4;
+
+symmetric = true;
+
+plane.hstab = initialize_panel(n_elem,chord_dist,span,dihedral,twist,sweep,x_root,z_root,symmetric);
+clear n_elem chord_dist span dihedral twist sweep x_root z_root symmetric
+
+%% V-stab
+n_elem = 1; 
+
+chord_dist = [0.3, 0.3];
+span       = 0.4;
+dihedral   = [90,0];
+twist      = [0,0];
+sweep      = [0,0];
+
+x_root = 1.90;
+z_root = 0;
+
+symmetric = false;
+
+plane.vstab = initialize_panel(n_elem,chord_dist,span,dihedral,twist,sweep,x_root,z_root,symmetric);
+clear n_elem chord_dist span dihedral twist sweep x_root z_root symmetric
+
+%% SOLAR Cell Generators
+
+n_elem = 12; 
+
+chord_dist = 0.152*ones(1,n_elem+1);
+span       = 0.152*ones(1,n_elem);
+dihedral   = 6*ones(1,n_elem);
+twist      = 3*ones(1,n_elem+1);
+sweep      =  zeros(1,n_elem+1);
+
+x_root = 0.8;
+z_root = 0.01;
+
+symmetric = true;
+
+plane.solar = initialize_panel(n_elem,chord_dist,span,dihedral,twist,sweep,x_root,z_root,symmetric);
+clear n_elem chord_dist span dihedral twist sweep x_root z_root symmetric
+
+figure 
+hold on
+
+side_steps = 80;
+vert_steps = 20;
+
+energy_factor_lookup = zeros(side_steps*vert_steps,3);
+
+elv_q = linspace(-pi/4,-0.025,vert_steps);
+azi_q = linspace(0,2*pi,side_steps);
+
+k = 1;
+for i = 1:length(elv_q)
+    for j = 1:length(azi_q)
+        [EF,AF,CP] = shadow_cast(plane,elv_q(i),azi_q(j))
+        energy_factor = mean();
+        %plot3(elv_q(i),azi_q(j),energy_factor,'.r',MarkerSize=10)
+        energy_factor_lookup(k,:) = [elv_q(i),azi_q(j),energy_factor];
+        k = k+1;
+    end
+end
+
+elv_q = linspace(0.025,pi/4,vert_steps);
+azi_q = linspace(0,2*pi,side_steps);
+
+for i = 1:length(elv_q)
+    for j = 1:length(azi_q)
+        energy_factor = mean(shadow_cast(plane,elv_q(i),azi_q(j)));
+        %plot3(elv_q(i),azi_q(j),energy_factor,'.r',MarkerSize=10)
+        energy_factor_lookup(k,:) = [elv_q(i),azi_q(j),energy_factor];
+        k = k+1;
+    end
+end
+
+writematrix(energy_factor_lookup,'Energy_Factor_Lookup.csv')
+
+%% PANEL INITIALIZER
+
+function object = initialize_panel(n_elem,chord_dist,span,dihedral,twist,sweep,x_root,z_root,symmetric)
+    if symmetric == true
+        object = cell(2*n_elem,6);
+    else
+        object = cell(n_elem,6);
+    end 
+
+    for i = 1:n_elem
+        object{i,1} = chord_dist(i:i+1);          % vector
+        object{i,2} = span(i); 
+        object{i,3} = deg2rad(dihedral(i));       % scalar
+        object{i,4} = twist(i:i+1);               % vector
+        object{i,5} = sweep(i:i+1);               % vector
+        
+    
+        % corner order: front inner --> front outer --> back outer --> back
+        % inner
+        if i == 1
+            
+            cornersx = x_root+[0,sweep(i+1),sweep(i+1)+chord_dist(i+1),chord_dist(i)];
+            cornersy = [0,span(i)*cosd(dihedral(i)),span(i)*cosd(dihedral(i)),0];
+            cornersz = z_root+[0,span(i)*sind(dihedral(i)),span(i)*sind(dihedral(i)),0];
+    
+            object{i,6} = [cornersx;cornersy;cornersz];
+        else 
+            cornersx = cornersx(2)+[0,sweep(i+1),sweep(i+1)+chord_dist(i+1),chord_dist(i)];
+            cornersy = cornersy(2)+[0,span(i)*cosd(dihedral(i)),span(i)*cosd(dihedral(i)),0];
+            cornersz = cornersz(2)+[0,span(i)*sind(dihedral(i)),span(i)*sind(dihedral(i)),0];
+    
+            object{i,6} = [cornersx;cornersy;cornersz];
+        end
+    end
+    
+    % Symmetric Duplication 
+    clear i
+    if symmetric == true
+        for i = n_elem+1 : 2*n_elem
+            object{i,1} = object{i-n_elem,1};
+            object{i,2} = object{i-n_elem,2};
+            object{i,3} = object{i-n_elem,3};
+            object{i,4} = object{i-n_elem,4};
+            object{i,5} = object{i-n_elem,5};
+        
+        
+            coords = object{i-n_elem,6};
+        
+            object{i,6} = [coords(1,:);-coords(2,:);coords(3,:)];
+        end
+    end
+
+    clear i cornersz cornersy cornersx
+
+end
+
