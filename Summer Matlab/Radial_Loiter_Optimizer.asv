@@ -1,0 +1,243 @@
+clear
+clc
+close all
+
+R_max = 500;
+R_min = 100; 
+alt_floor = 0;
+alt_ceil = 120;
+rms_out = 200;
+max_clmgrad = deg2rad(30);
+max_snkrad = deg2rad();
+
+R_m = 150;
+
+num_stations = 8;
+theta = linspace(0,2*pi,num_stations+1);
+theta = theta(1:end-1);
+direction = 1;
+
+
+global wpts  % make sure wpts is global
+wpts = [];
+initialize_plane()
+
+
+vars = [];
+for k = 1:num_stations
+    vars = [vars, optimizableVariable(sprintf('r%d',k), [R_min, R_max])       ];
+    vars = [vars, optimizableVariable(sprintf('a%d',k), [alt_floor, alt_ceil])];
+end
+
+
+results = bayesopt(@(x) -ObjectFun(x,theta,direction,num_stations,R_m,max_clmgrad,max_snkrad), vars, ...
+    'MaxObjectiveEvaluations',100, ...
+    'IsObjectiveDeterministic', true);
+
+
+
+%% Results 
+figure 
+RA = table2array(results.XAtMinObjective);
+
+szRA = size(RA,2);
+
+RR = RA(1:2:szRA);
+AA = RA(2:2:szRA);
+
+[XX,YY,ZZ] = pol2cart(theta,RR,AA);
+
+axis equal
+hold on
+
+
+plot3(XX-XX(1),YY-YY(1),ZZ-ZZ(1),'.-k',MarkerSize=12,MarkerEdgeColor='r')
+
+num_circ = 100;
+theta_plot = linspace(0,2*pi,num_circ);
+[XRM,YRM] = pol2cart(theta_plot,R_max*ones(size(theta_plot))) ;
+[XRm,YRm] = pol2cart(theta_plot,R_min*ones(size(theta_plot))) ;
+plot3(XRM-XX(1),YRM-YY(1),zeros(size(XRM)),'r')
+plot3(XRm-XX(1),YRm-YY(1),zeros(size(XRm)),'b')
+
+wpts_out = [XX;YY;ZZ];
+
+wpts_out = wpts_out-wpts_out(:,1);
+wpts_out(:,end+1) = [0;0;0];
+
+wpts_out(4:6,end) = wpts_out(1:3,1)-wpts_out(1:3,end);
+for j = 2:size(wpts_out,2)
+    wpts_out(4:6,j) = wpts_out(1:3,j)-wpts_out(1:3,j-1);
+end
+
+
+quiver3(wpts_out(1,:),wpts_out(2,:),wpts_out(3,:),wpts_out(4,:),wpts_out(5,:),wpts_out(6,:))
+
+
+writematrix(wpts_out,'Bayesopt_loiter_wpts.csv')
+
+
+
+
+function [objective]  = ObjectFun (vars,theta,direction,num_stations,R_m,max_clmgrad,max_snkgrad)
+    global wpts
+    
+    r_array = zeros(1,num_stations);
+    a_array = zeros(1,num_stations);
+
+    for k = 1:num_stations
+        r_array(k) = vars.(sprintf('r%d',k));
+        a_array(k) = vars.(sprintf('a%d',k));
+    end
+
+    wpts = Radial_Loiter_Plan(theta,r_array,a_array,direction);
+    
+    % set origin to first node
+    wpts = wpts-wpts(:,1);
+    wpts(:,end+1) = [0;0;0];
+
+    % format the track tangents
+    wpts(4:6,end) = wpts(1:3,1)-wpts(1:3,end);
+    for i = 2:size(wpts,2)
+        wpts(4:6,i) = wpts(1:3,i)-wpts(1:3,i-1);
+    end
+
+    
+    % Ensure the aircraft starts at the first node
+    wpts = wpts(:,2:end);
+
+    modelName = 'Uncoupled_Aircraft_State_Space';
+    load_system(modelName);
+    simOut = sim(modelName);
+    objective = simOut.charge_acc.Data(end);
+
+
+    % Penalizing bad behaviour excessively
+    
+    Delta_ro = zeros(1,length(r_array));
+    Delta_ri = zeros(1,length(r_array));
+    alt_grads = zeros(1,length(r_array));
+    Delta_theta = theta(2)-theta(1);
+
+    
+    
+    for i = 2:length(r_array)
+        Delta_ro(i) = outer_tol(r_array(i-1),R_m,Delta_theta);
+        Delta_ri(i) = inner_tol(r_array(i-1),R_m,Delta_theta);
+        alt_grads(i) =  alt_command(r_array(i-1),r_array(i),a_array(i-1),a_array(i),Delta_theta);
+    end
+    Delta_ro(1) = outer_tol(r_array(end),R_m,Delta_theta);
+    Delta_ri(1) = inner_tol(r_array(end),R_m,Delta_theta);
+    alt_grads(1) =  alt_command(r_array(end),r_array(1),a_array(end),a_array(1),Delta_theta);
+    
+    
+
+    
+    % if the difference from one radius to the next exceeds the outer bound
+    % penalize heavily
+
+    ro_violation = abs(max(0, diff([r_array(end),r_array]) - Delta_ro)).^2;
+
+    % if the difference from one radius to the next exceeds the inner bound
+    % peanalize heavily
+       
+    ri_violation = abs(min(0, diff([r_array(end),r_array]) - Delta_ri)).^2;
+    
+    % if any two points exceeds the max climb grad, penalize
+
+    clm_violation = abs(max(0,diff([alt_grads(end);alt_grads]) -  max_clmgrad)).^2;
+    
+    snk_violation = abs(min(0,diff([alt_grads(end);alt_grads]) -  max_snkgrad)).^2;
+
+    penalty = (sum(clm_violation)+sum(snk_violation)+sum(ro_violation)+sum(ri_violation))*1e5;
+
+
+    objective = objective - penalty;
+
+
+end
+
+%% Path Form
+
+function [wpts] = Radial_Loiter_Plan(theta,r_array,alt_array,direction)
+    if direction == -1
+        r_array = fliplr(r_array);
+    end
+    [X,Y] = pol2cart(theta,r_array);
+    Z = alt_array;
+    wpts = [X;Y;Z];
+end
+
+%% Dyanmic Radius Tolerancing
+
+function [RT_O,tau_sol] = inner_tol(R, Rm, theta)
+    % Define constants
+    r1 = 2* R * sin(theta/2);
+    r2 = @(tau) 2 * Rm * sin(tau);
+
+    b1 = 2*R*sin(theta/2).^2;
+    b2 = @(tau) 2*Rm*sin(tau).^2;
+
+    % Define f and g
+    f = @(tau) ( b2(tau) - b1 ) ./ cos(theta);
+    g = @(tau) sqrt( r2(tau).^2 + r1^2 - 2 * r2(tau).*r1 .* cos(tau - (theta/2))  );
+
+    % Root function
+    h = @(tau) f(tau) - g(tau);
+
+    % Search interval for tau
+    tau_range = linspace(0, pi/2, 500);  % can adjust interval if needed
+    h_vals = h(tau_range);
+
+    % Find sign changes -> possible roots
+    idx = find(h_vals(1:end-1).*h_vals(2:end) <= 0);
+
+    if isempty(idx)
+        % No solution found, return R
+        RT_O = R;
+        tau_sol = pi/2;
+    else
+        % Solve numerically from first sign change (smallest root)
+        tau_guess = tau_range(idx(1));
+        tau_sol = fzero(h, tau_guess);
+        RT_O = f(tau_sol);
+    end
+end
+
+
+function [RT_O,tau_sol] = outer_tol(R, Rm, theta)
+    % Evaluating Constants
+    x1 = 2*R*sin(theta/2)^2; 
+    x2 = @(tau) 2*Rm*cos(tau).^2;
+    
+    % Root function
+    h = @(tau) 2*Rm*( ( sin(tau).^2 + (R/(2*Rm)) ).*tan(theta) - sin(tau).*cos(tau));
+
+    % Search interval for tau
+    tau_range = linspace(0, pi/2, 500);  % can adjust interval if needed
+    h_vals = h(tau_range);
+
+    
+    % Find sign changes -> possible roots
+    idx = find(h_vals(1:end-1).*h_vals(2:end) <= 0);
+
+    if isempty(idx)
+        % No solution found, return R
+        RT_O = R;
+        tau_sol = pi/2;
+    else
+        % Solve numerically from first sign change (smallest root)
+        tau_guess = tau_range(idx(1));
+        tau_sol = fzero(h, tau_guess);
+        RT_O =  (x1 + x2(tau_sol)) / cos(theta);
+       
+    end
+end
+
+%% Climb Rates Saturation
+function [alt_grad] = alt_command(R1,R2,A1,A2,delta_theta)
+    dist = sqrt( ( R1 - R2*cos(delta_theta) )^2 + R2*sin(delta_theta)^2 );
+    delta_alt = A2-A1;
+    alt_grad = atan(delta_alt / dist);
+
+end
